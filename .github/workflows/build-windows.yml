@@ -1,0 +1,176 @@
+name: Build Windows Container
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 1 * *'  # Build monthly on 1st at 2 AM UTC
+
+env:
+  REGISTRY: docker.io
+
+jobs:
+  build:
+    runs-on: windows-2022
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          $BUILD_DATE = Get-Date -Format "yyyyMMddHHmm"
+          $TAG_YYMM = Get-Date -Format "yyMM"
+          $GIT_COMMIT = $env:GITHUB_SHA.Substring(0,7)
+          
+          # Extract repo name from GITHUB_REPOSITORY (owner/repo)
+          $REPO_NAME = $env:GITHUB_REPOSITORY.Split('/')[1]
+          
+          # Get Docker username from variables, fallback to repo owner
+          $DOCKER_USER = "${{ vars.DOCKER_USERNAME }}"
+          if ([string]::IsNullOrWhiteSpace($DOCKER_USER)) {
+            $DOCKER_USER = $env:GITHUB_REPOSITORY.Split('/')[0]
+          }
+          
+          $IMAGE_NAME = "$DOCKER_USER/$REPO_NAME"
+          
+          echo "BUILD_DATE=$BUILD_DATE" >> $env:GITHUB_ENV
+          echo "TAG_YYMM=$TAG_YYMM" >> $env:GITHUB_ENV
+          echo "GIT_COMMIT=$GIT_COMMIT" >> $env:GITHUB_ENV
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $env:GITHUB_ENV
+          echo "REPO_NAME=$REPO_NAME" >> $env:GITHUB_ENV
+          
+          Write-Host "Image Name: $IMAGE_NAME"
+          Write-Host "Build Date: $BUILD_DATE"
+          Write-Host "Tag YYMM: $TAG_YYMM"
+          Write-Host "Git Commit: $GIT_COMMIT"
+        shell: powershell
+
+      - name: Build Docker image with annotations
+        run: |
+          docker build `
+            --build-arg BUILD_DATE=$env:BUILD_DATE `
+            --build-arg GIT_COMMIT=$env:GIT_COMMIT `
+            --label "maintainer=CasjaysDev <docker-admin@casjaysdev.pro>" `
+            --label "org.opencontainers.image.vendor=CasjaysDev" `
+            --label "org.opencontainers.image.authors=CasjaysDev" `
+            --label "org.opencontainers.image.description=Containerized version of $env:REPO_NAME" `
+            --label "org.opencontainers.image.title=$env:REPO_NAME" `
+            --label "org.opencontainers.image.base.name=$env:REPO_NAME" `
+            --label "org.opencontainers.image.licenses=WTFPL" `
+            --label "org.opencontainers.image.created=$env:BUILD_DATE" `
+            --label "org.opencontainers.image.version=$env:TAG_YYMM" `
+            --label "org.opencontainers.image.url=https://hub.docker.com/r/$env:IMAGE_NAME" `
+            --label "org.opencontainers.image.source=$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `
+            --label "org.opencontainers.image.vcs-type=Git" `
+            --label "org.opencontainers.image.revision=$env:GIT_COMMIT" `
+            --label "org.opencontainers.image.documentation=$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `
+            --label "com.github.containers.toolbox=false" `
+            --annotation "maintainer=CasjaysDev <docker-admin@casjaysdev.pro>" `
+            --annotation "org.opencontainers.image.vendor=CasjaysDev" `
+            --annotation "org.opencontainers.image.authors=CasjaysDev" `
+            --annotation "org.opencontainers.image.description=Containerized version of $env:REPO_NAME" `
+            --annotation "org.opencontainers.image.title=$env:REPO_NAME" `
+            --annotation "org.opencontainers.image.base.name=$env:REPO_NAME" `
+            --annotation "org.opencontainers.image.licenses=WTFPL" `
+            --annotation "org.opencontainers.image.created=$env:BUILD_DATE" `
+            --annotation "org.opencontainers.image.version=$env:TAG_YYMM" `
+            --annotation "org.opencontainers.image.url=https://hub.docker.com/r/$env:IMAGE_NAME" `
+            --annotation "org.opencontainers.image.source=$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `
+            --annotation "org.opencontainers.image.vcs-type=Git" `
+            --annotation "org.opencontainers.image.revision=$env:GIT_COMMIT" `
+            --annotation "org.opencontainers.image.documentation=$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" `
+            --annotation "com.github.containers.toolbox=false" `
+            --tag $env:IMAGE_NAME`:latest `
+            --tag $env:IMAGE_NAME`:$env:TAG_YYMM `
+            .
+        shell: powershell
+
+      - name: Test container
+        run: |
+          Write-Host "Starting container for testing..."
+          docker run -d --name test-container $env:IMAGE_NAME`:latest
+          Start-Sleep -Seconds 10
+          
+          Write-Host "Checking container health..."
+          docker ps -a
+          
+          $containerStatus = docker inspect test-container --format='{{.State.Status}}'
+          Write-Host "Container status: $containerStatus"
+          
+          if ($containerStatus -ne "running") {
+            Write-Host "Container logs:"
+            docker logs test-container
+            exit 1
+          }
+          
+          Write-Host "Testing healthcheck..."
+          docker exec test-container powershell -Command "C:/Windows/System32/entrypoint.ps1 healthcheck"
+          
+          Write-Host "Stopping test container..."
+          docker stop test-container
+          docker rm test-container
+        shell: powershell
+
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request' && secrets.DOCKER_PASSWORD != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USERNAME || github.repository_owner }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Push to Docker Hub
+        if: github.event_name != 'pull_request' && secrets.DOCKER_PASSWORD != ''
+        run: |
+          Write-Host "Pushing $env:IMAGE_NAME`:latest..."
+          docker push $env:IMAGE_NAME`:latest
+          
+          Write-Host "Pushing $env:IMAGE_NAME`:$env:TAG_YYMM..."
+          docker push $env:IMAGE_NAME`:$env:TAG_YYMM
+          
+          Write-Host "=== Images pushed successfully ==="
+          Write-Host "Latest: $env:IMAGE_NAME`:latest"
+          Write-Host "Monthly: $env:IMAGE_NAME`:$env:TAG_YYMM"
+        shell: powershell
+
+      - name: Image details
+        if: always()
+        run: |
+          Write-Host "=== Built Images ==="
+          docker images $env:IMAGE_NAME
+          
+          Write-Host "`n=== Image Labels ==="
+          docker inspect $env:IMAGE_NAME`:latest --format='{{json .Config.Labels}}' | ConvertFrom-Json | Format-List
+          
+          Write-Host "`n=== Image Size ==="
+          $size = docker images $env:IMAGE_NAME`:latest --format='{{.Size}}'
+          Write-Host "Image size: $size"
+        shell: powershell
+
+      - name: Create release summary
+        if: github.event_name != 'pull_request'
+        run: |
+          Write-Host "## 📦 Container Build Summary" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Image:** ``$env:IMAGE_NAME``" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Tags:**" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "- ``latest``" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "- ``$env:TAG_YYMM``" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Build Date:** $env:BUILD_DATE" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "**Commit:** ``$env:GIT_COMMIT``" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "### 🚀 Pull Command" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host '```powershell' >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "docker pull $env:IMAGE_NAME`:latest" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host '```' >> $env:GITHUB_STEP_SUMMARY
+        shell: powershell
